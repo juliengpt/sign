@@ -107,4 +107,7 @@ function testTemplateAccess() {
         return ['success' => false, 'message' => 'Erreur accès template (Code: ' . $httpCode . ')'];
     }
 }
+
+// Configuration Google Docs
+define('GOOGLE_SERVICE_ACCOUNT_EMAIL', 'signnow-service@signnow-contracts.iam.gserviceaccount.com');
 ?>

@@ -1,10 +1,12 @@
 <?php
-// backend.php - Système complet Google Docs + SignNow
+// backend.php - Système propre Google Docs + SignNow
 require_once 'config.php';
+require_once 'vendor/autoload.php';
 
 // Configuration Google Docs
-define('GOOGLE_DOCS_ID', 'VOTRE_GOOGLE_DOCS_ID_ICI'); // À remplacer par votre ID Google Docs
-define('GOOGLE_SERVICE_ACCOUNT_FILE', 'service-account.json'); // Fichier de credentials Google
+define('GOOGLE_DOCS_ID', '1YSWjJnFW0XHG0FJR4iYZcFJLU_xRYEnsmt20FG9inUk');
+define('GOOGLE_SERVICE_ACCOUNT_FILE', __DIR__ . '/credentials/service-account.json');
+define('SHARED_FOLDER_ID', '1pN7yqrOkUQkDr9dPOl24docB_eUS_u4X'); // Votre dossier partagé
 
 // Traitement du formulaire
 $message = '';
@@ -35,28 +37,26 @@ function generateContractFromGoogleDocs($formData) {
             return ['success' => false, 'message' => $validation['message']];
         }
         
-        // 2. Créer une copie du Google Docs et remplacer les placeholders
-        $documentContent = fillGoogleDocsTemplate($formData);
-        if (!$documentContent) {
-            return ['success' => false, 'message' => 'Impossible de traiter le modèle Google Docs'];
-        }
-        
-        // 3. Convertir en PDF
-        $pdfPath = convertToPdf($documentContent, $formData);
+        // 2. Créer une copie du Google Docs, la remplir et obtenir le PDF
+        $pdfPath = createFilledDocumentAndExportPDF($formData);
         if (!$pdfPath) {
-            return ['success' => false, 'message' => 'Impossible de générer le PDF'];
+            return ['success' => false, 'message' => 'Impossible de créer le contrat depuis Google Docs'];
         }
         
-        // 4. Upload vers SignNow
+        // 3. Upload vers SignNow
         $documentId = uploadPdfToSignNow($pdfPath);
         if (!$documentId) {
+            // Nettoyer le fichier PDF local en cas d'erreur
+            if (file_exists($pdfPath)) {
+                unlink($pdfPath);
+            }
             return ['success' => false, 'message' => 'Impossible d\'uploader vers SignNow'];
         }
         
-        // 5. Envoyer invitation de signature
+        // 4. Envoyer invitation de signature
         $inviteResult = sendSigningInvitation($documentId, $formData);
         
-        // 6. Nettoyer les fichiers temporaires
+        // 5. Nettoyer le fichier PDF local
         if (file_exists($pdfPath)) {
             unlink($pdfPath);
         }
@@ -66,6 +66,120 @@ function generateContractFromGoogleDocs($formData) {
     } catch (Exception $e) {
         logMessage("Erreur generateContractFromGoogleDocs: " . $e->getMessage(), 'ERROR');
         return ['success' => false, 'message' => 'Erreur lors de la génération: ' . $e->getMessage()];
+    }
+}
+
+// Fonction pour créer une copie, la remplir et exporter en PDF
+function createFilledDocumentAndExportPDF($formData) {
+    $copiedDocId = null;
+    
+    try {
+        // Initialisation du client Google avec tous les scopes nécessaires
+        $client = new Google_Client();
+        $client->setAuthConfig(GOOGLE_SERVICE_ACCOUNT_FILE);
+        $client->addScope([
+            Google_Service_Docs::DOCUMENTS,
+            Google_Service_Drive::DRIVE
+        ]);
+        
+        // Services Google
+        $docsService = new Google_Service_Docs($client);
+        $driveService = new Google_Service_Drive($client);
+        
+        // 1. Créer une copie du document dans le dossier partagé
+        $copyMetadata = new Google_Service_Drive_DriveFile();
+        $copyMetadata->setName('Contrat_' . $formData['id_boutique'] . '_' . date('Y-m-d_H-i-s'));
+       //  $copyMetadata->setParents([SHARED_FOLDER_ID]);
+        
+        $copiedFile = $driveService->files->copy(GOOGLE_DOCS_ID, $copyMetadata);
+        $copiedDocId = $copiedFile->getId();
+        
+        logMessage("Copie créée dans le dossier partagé: " . $copiedDocId, 'SUCCESS');
+        
+        // 2. Préparer les remplacements
+        $replacements = [
+            '{{id_boutique}}' => $formData['id_boutique'],
+            '{{nom_acheteur}}' => $formData['nom_acheteur'],
+            '{{prenom_acheteur}}' => $formData['prenom_acheteur'],
+            '{{adresse_acheteur}}' => $formData['adresse_acheteur'],
+            '{{telephone_acheteur}}' => $formData['telephone_acheteur'],
+            '{{email_acheteur}}' => $formData['email_acheteur'],
+            '{{piece_identite}}' => $formData['piece_identite'],
+            '{{date_naissance}}' => formatDate($formData['date_naissance']),
+            '{{type_produits}}' => $formData['type_produits'],
+            '{{secteur_activite}}' => $formData['secteur_activite'],
+            '{{date_lancement}}' => formatDate($formData['date_lancement']),
+            '{{ca_mensuel}}' => formatCurrency($formData['ca_mensuel']),
+            '{{prix_boutique}}' => formatCurrency($formData['prix_boutique']),
+            '{{date_contrat}}' => formatDate($formData['date_contrat'] ?? date('Y-m-d'))
+        ];
+        
+        // 3. Remplacer tous les placeholders dans le document copié
+        $requests = [];
+        foreach ($replacements as $placeholder => $value) {
+            $requests[] = new Google_Service_Docs_Request([
+                'replaceAllText' => [
+                    'containsText' => [
+                        'text' => $placeholder,
+                        'matchCase' => true
+                    ],
+                    'replaceText' => $value
+                ]
+            ]);
+        }
+        
+        // Exécuter les remplacements
+        if (!empty($requests)) {
+            $batchUpdateRequest = new Google_Service_Docs_BatchUpdateDocumentRequest([
+                'requests' => $requests
+            ]);
+            
+            $docsService->documents->batchUpdate($copiedDocId, $batchUpdateRequest);
+            logMessage("Placeholders remplacés: " . count($replacements) . " remplacements", 'SUCCESS');
+        }
+        
+        // 4. Attendre que les modifications soient propagées
+        sleep(3);
+        
+        // 5. Exporter le document rempli en PDF
+        $pdfContent = $driveService->files->export($copiedDocId, 'application/pdf', [
+            'alt' => 'media'
+        ]);
+        
+        // 6. Sauvegarder le PDF localement
+        $filename = 'contrat_' . $formData['id_boutique'] . '_' . time() . '.pdf';
+        $filepath = UPLOAD_DIR . $filename;
+        
+        file_put_contents($filepath, $pdfContent->getBody()->getContents());
+        
+        // 7. Supprimer la copie temporaire du Google Docs
+        try {
+            $driveService->files->delete($copiedDocId);
+            logMessage("Copie temporaire supprimée: " . $copiedDocId, 'SUCCESS');
+        } catch (Exception $e) {
+            logMessage("Attention: Impossible de supprimer la copie temporaire: " . $e->getMessage(), 'WARNING');
+        }
+        
+        logMessage("PDF généré avec succès: " . $filename, 'SUCCESS');
+        return $filepath;
+        
+    } catch (Exception $e) {
+        // En cas d'erreur, essayer de nettoyer la copie temporaire
+        if ($copiedDocId) {
+            try {
+                $client = new Google_Client();
+                $client->setAuthConfig(GOOGLE_SERVICE_ACCOUNT_FILE);
+                $client->addScope(Google_Service_Drive::DRIVE);
+                $driveService = new Google_Service_Drive($client);
+                $driveService->files->delete($copiedDocId);
+                logMessage("Copie temporaire nettoyée après erreur: " . $copiedDocId, 'INFO');
+            } catch (Exception $cleanupError) {
+                logMessage("Impossible de nettoyer la copie temporaire: " . $cleanupError->getMessage(), 'ERROR');
+            }
+        }
+        
+        logMessage("Erreur createFilledDocumentAndExportPDF: " . $e->getMessage(), 'ERROR');
+        return false;
     }
 }
 
@@ -110,180 +224,14 @@ function validateContractData($data) {
     return ['valid' => true];
 }
 
-// Fonction pour remplir le modèle Google Docs (Version simplifiée)
-function fillGoogleDocsTemplate($data) {
-    try {
-        // Version simplifiée : on va simuler le contenu du Google Docs
-        // En production, il faudrait utiliser l'API Google Docs
-        
-        $template = getContractTemplate();
-        
-        // Remplacer tous les placeholders
-        $replacements = [
-            '{{id_boutique}}' => $data['id_boutique'],
-            '{{nom_acheteur}}' => $data['nom_acheteur'],
-            '{{prenom_acheteur}}' => $data['prenom_acheteur'],
-            '{{adresse_acheteur}}' => $data['adresse_acheteur'],
-            '{{telephone_acheteur}}' => $data['telephone_acheteur'],
-            '{{email_acheteur}}' => $data['email_acheteur'],
-            '{{piece_identite}}' => $data['piece_identite'],
-            '{{date_naissance}}' => formatDate($data['date_naissance']),
-            '{{type_produits}}' => $data['type_produits'],
-            '{{secteur_activite}}' => $data['secteur_activite'],
-            '{{date_lancement}}' => formatDate($data['date_lancement']),
-            '{{ca_mensuel}}' => formatCurrency($data['ca_mensuel']),
-            '{{prix_boutique}}' => formatCurrency($data['prix_boutique']),
-            '{{date_contrat}}' => formatDate($data['date_contrat'] ?? date('Y-m-d'))
-        ];
-        
-        $filledContent = str_replace(array_keys($replacements), array_values($replacements), $template);
-        
-        return $filledContent;
-        
-    } catch (Exception $e) {
-        logMessage("Erreur fillGoogleDocsTemplate: " . $e->getMessage(), 'ERROR');
-        return false;
-    }
-}
-
-// Template de contrat (à adapter selon votre Google Docs)
-function getContractTemplate() {
-    return '
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>Contrat d\'Acquisition Boutique</title>
-    <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; margin: 40px; }
-        .header { text-align: center; margin-bottom: 30px; }
-        .section { margin: 20px 0; }
-        .signature-area { margin-top: 50px; }
-        .text-tag { color: #ccc; font-size: 10px; }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>CONTRAT D\'ACQUISITION DE BOUTIQUE E-COMMERCE</h1>
-        <p><strong>ID Boutique: {{id_boutique}}</strong></p>
-        <p>Date du contrat: {{date_contrat}}</p>
-    </div>
-
-    <div class="section">
-        <h2>PARTIES AU CONTRAT</h2>
-        
-        <p><strong>VENDEUR :</strong><br>
-        MPI MANAGE LTD<br>
-        Société de droit anglais<br>
-        Email: support@shopbuyhere.co</p>
-        
-        <p><strong>ACHETEUR :</strong><br>
-        <strong>{{prenom_acheteur}} {{nom_acheteur}}</strong><br>
-        Né(e) le : {{date_naissance}}<br>
-        Adresse : {{adresse_acheteur}}<br>
-        Téléphone : {{telephone_acheteur}}<br>
-        Email : {{email_acheteur}}<br>
-        Pièce d\'identité : {{piece_identite}}</p>
-    </div>
-
-    <div class="section">
-        <h2>OBJET DU CONTRAT</h2>
-        <p>Le présent contrat a pour objet l\'acquisition de la boutique e-commerce identifiée par l\'ID <strong>{{id_boutique}}</strong>, spécialisée dans la vente de {{type_produits}} dans le secteur {{secteur_activite}}.</p>
-        
-        <p><strong>Informations de la boutique :</strong></p>
-        <ul>
-            <li>Date de lancement : {{date_lancement}}</li>
-            <li>Secteur d\'activité : {{secteur_activite}}</li>
-            <li>Type de produits : {{type_produits}}</li>
-            <li>Chiffre d\'affaires mensuel moyen : {{ca_mensuel}}</li>
-        </ul>
-    </div>
-
-    <div class="section">
-        <h2>CONDITIONS FINANCIÈRES</h2>
-        <p><strong>Prix d\'acquisition total : {{prix_boutique}}</strong></p>
-        <p>Le paiement sera effectué selon les modalités convenues entre les parties.</p>
-    </div>
-
-    <div class="section">
-        <h2>OBLIGATIONS DES PARTIES</h2>
-        <p>Le vendeur s\'engage à transférer la propriété complète de la boutique e-commerce à l\'acheteur.</p>
-        <p>L\'acheteur s\'engage à respecter les conditions de paiement et à maintenir l\'activité commerciale.</p>
-    </div>
-
-    <div class="signature-area">
-        <p>Paraphe de l\'acheteur (à apposer en bas de chaque page) :</p>
-        <p class="text-tag">[[i|initial|req|signer1]]</p>
-    </div>
-
-    <div style="page-break-before: always;">
-        <h2>CONDITIONS GÉNÉRALES</h2>
-        <p>Ce contrat est régi par le droit anglais. Toute modification doit faire l\'objet d\'un avenant écrit.</p>
-        
-        <div class="signature-area">
-            <p>Paraphe de l\'acheteur :</p>
-            <p class="text-tag">[[i|initial|req|signer1]]</p>
-        </div>
-    </div>
-
-    <div style="page-break-before: always;">
-        <h2>SIGNATURES</h2>
-        <p>Les parties reconnaissent avoir lu et accepté toutes les clauses du présent contrat.</p>
-        
-        <div style="margin-top: 100px;">
-            <p><strong>Signature de l\'acheteur :</strong></p>
-            <p class="text-tag">[[s|signature|req|signer1]]</p>
-            <p>{{prenom_acheteur}} {{nom_acheteur}}</p>
-            <p>Date : {{date_contrat}}</p>
-        </div>
-        
-        <div style="margin-top: 50px;">
-            <p><strong>Signature du vendeur :</strong></p>
-            <p>MPI MANAGE LTD</p>
-            <p>Date : {{date_contrat}}</p>
-        </div>
-    </div>
-</body>
-</html>';
-}
-
-// Fonction pour convertir en PDF
-function convertToPdf($htmlContent, $data) {
-    try {
-        // Utilisation de DomPDF (il faut l'installer via Composer)
-        // composer require dompdf/dompdf
-        
-        require_once 'vendor/autoload.php';
-        use Dompdf\Dompdf;
-        use Dompdf\Options;
-        
-        $options = new Options();
-        $options->set('defaultFont', 'Arial');
-        $options->set('isRemoteEnabled', true);
-        
-        $dompdf = new Dompdf($options);
-        $dompdf->loadHtml($htmlContent);
-        $dompdf->setPaper('A4', 'portrait');
-        $dompdf->render();
-        
-        // Sauvegarder le PDF temporairement
-        $filename = 'contrat_' . $data['id_boutique'] . '_' . time() . '.pdf';
-        $filepath = UPLOAD_DIR . $filename;
-        
-        file_put_contents($filepath, $dompdf->output());
-        
-        return $filepath;
-        
-    } catch (Exception $e) {
-        logMessage("Erreur convertToPdf: " . $e->getMessage(), 'ERROR');
-        return false;
-    }
-}
-
 // Fonction pour uploader le PDF vers SignNow
 function uploadPdfToSignNow($pdfPath) {
     try {
         $url = 'https://api.signnow.com/document';
+        
+        if (!file_exists($pdfPath)) {
+            throw new Exception("Le fichier PDF n'existe pas: " . $pdfPath);
+        }
         
         $cfile = new CURLFile($pdfPath, 'application/pdf', basename($pdfPath));
         $data = ['file' => $cfile];
@@ -293,21 +241,32 @@ function uploadPdfToSignNow($pdfPath) {
         curl_setopt($ch, CURLOPT_POST, true);
         curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 60);
         curl_setopt($ch, CURLOPT_HTTPHEADER, [
             'Authorization: Bearer ' . SIGNNOW_API_KEY
         ]);
         
         $response = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = curl_error($ch);
         curl_close($ch);
+        
+        if ($curlError) {
+            throw new Exception("Erreur cURL: " . $curlError);
+        }
         
         if ($httpCode === 200 || $httpCode === 201) {
             $result = json_decode($response, true);
-            logMessage("PDF uploadé vers SignNow avec succès: " . ($result['id'] ?? 'ID non trouvé'), 'SUCCESS');
-            return $result['id'] ?? null;
+            $documentId = $result['id'] ?? null;
+            
+            if ($documentId) {
+                logMessage("PDF uploadé vers SignNow avec succès: " . $documentId, 'SUCCESS');
+                return $documentId;
+            } else {
+                throw new Exception("Pas d'ID de document dans la réponse SignNow");
+            }
         } else {
-            logMessage("Erreur upload SignNow HTTP $httpCode: $response", 'ERROR');
-            return false;
+            throw new Exception("Erreur HTTP $httpCode: $response");
         }
         
     } catch (Exception $e) {
@@ -348,16 +307,12 @@ function sendSigningInvitation($documentId, $formData) {
             'message' => $message
         ];
         
-        // Ajouter copie si spécifiée
-        if (!empty($formData['copie_email']) && filter_var($formData['copie_email'], FILTER_VALIDATE_EMAIL)) {
-            $inviteData['cc'] = [['email' => $formData['copie_email']]];
-        }
-        
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $url);
         curl_setopt($ch, CURLOPT_POST, true);
         curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($inviteData));
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
         curl_setopt($ch, CURLOPT_HTTPHEADER, [
             'Content-Type: application/json',
             'Authorization: Bearer ' . SIGNNOW_API_KEY
@@ -365,14 +320,22 @@ function sendSigningInvitation($documentId, $formData) {
         
         $response = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = curl_error($ch);
         curl_close($ch);
+        
+        if ($curlError) {
+            throw new Exception("Erreur cURL: " . $curlError);
+        }
         
         if ($httpCode === 200 || $httpCode === 201) {
             logMessage("Invitation envoyée avec succès à " . $formData['email_acheteur'], 'SUCCESS');
             return ['success' => true, 'message' => 'Contrat envoyé avec succès'];
         } else {
-            logMessage("Erreur envoi invitation HTTP $httpCode: $response", 'ERROR');
-            return ['success' => false, 'message' => 'Erreur lors de l\'envoi de l\'invitation'];
+            $errorMessage = "Erreur HTTP $httpCode";
+            if ($response) {
+                $errorMessage .= ": " . $response;
+            }
+            throw new Exception($errorMessage);
         }
         
     } catch (Exception $e) {
@@ -384,17 +347,26 @@ function sendSigningInvitation($documentId, $formData) {
 // Fonctions utilitaires
 function formatDate($dateString) {
     if (!$dateString) return date('d/m/Y');
-    $date = new DateTime($dateString);
-    return $date->format('d/m/Y');
+    try {
+        $date = new DateTime($dateString);
+        return $date->format('d/m/Y');
+    } catch (Exception $e) {
+        logMessage("Erreur formatage date: $dateString", 'ERROR');
+        return date('d/m/Y');
+    }
 }
 
 function formatCurrency($amount) {
-    return number_format(floatval($amount), 2, ',', ' ') . ' €';
+    try {
+        return number_format(floatval($amount), 2, ',', ' ') . ' €';
+    } catch (Exception $e) {
+        logMessage("Erreur formatage montant: $amount", 'ERROR');
+        return '0,00 €';
+    }
 }
 
 // Interface HTML si pas de POST
 if (!$_POST) {
-    // Rediriger vers l'interface ou inclure le formulaire
     header('Location: index.php');
     exit;
 }
@@ -406,24 +378,80 @@ if (!$_POST) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Résultat Génération Contrat</title>
     <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .success { background: #d4edda; color: #155724; padding: 20px; border-radius: 8px; margin: 20px 0; }
-        .error { background: #f8d7da; color: #721c24; padding: 20px; border-radius: 8px; margin: 20px 0; }
-        .btn { background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin: 10px 0; }
+        body { 
+            font-family: Arial, sans-serif; 
+            max-width: 800px; 
+            margin: 0 auto; 
+            padding: 20px;
+            background: #f8f9fa;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        .success { 
+            background: #d4edda; 
+            color: #155724; 
+            padding: 20px; 
+            border-radius: 8px; 
+            margin: 20px 0;
+            border-left: 4px solid #28a745;
+        }
+        .error { 
+            background: #f8d7da; 
+            color: #721c24; 
+            padding: 20px; 
+            border-radius: 8px; 
+            margin: 20px 0;
+            border-left: 4px solid #dc3545;
+        }
+        .btn { 
+            background: #007bff; 
+            color: white; 
+            padding: 12px 24px; 
+            text-decoration: none; 
+            border-radius: 5px; 
+            display: inline-block; 
+            margin: 10px 5px;
+            transition: background 0.3s;
+        }
+        .btn:hover {
+            background: #0056b3;
+        }
+        .btn.success {
+            background: #28a745;
+        }
+        .btn.success:hover {
+            background: #1e7e34;
+        }
     </style>
 </head>
 <body>
-    <h1>🏪 Résultat Génération Contrat</h1>
-    
-    <?php if ($message): ?>
-        <div class="success"><?= $message ?></div>
-    <?php endif; ?>
-    
-    <?php if ($error): ?>
-        <div class="error"><?= $error ?></div>
-    <?php endif; ?>
-    
-    <a href="index.php" class="btn">← Retour au formulaire</a>
-    <a href="logs.php" class="btn">📋 Voir les logs</a>
+    <div class="container">
+        <h1>🏪 Contrat d'Acquisition - Résultat</h1>
+        
+        <?php if ($message): ?>
+            <div class="success">
+                <h3>✅ Succès !</h3>
+                <p><?= $message ?></p>
+                <small>🎯 Contrat généré depuis votre Google Docs avec formatage original préservé et tous les placeholders remplis.</small>
+            </div>
+        <?php endif; ?>
+        
+        <?php if ($error): ?>
+            <div class="error">
+                <h3>❌ Erreur</h3>
+                <p><?= $error ?></p>
+            </div>
+        <?php endif; ?>
+        
+        <div style="text-align: center; margin-top: 30px;">
+            <a href="index.php" class="btn success">← Nouveau contrat</a>
+            <a href="logs.php" class="btn">📋 Voir les logs</a>
+            <a href="test-final.php" class="btn">🔍 Diagnostic</a>
+        </div>
+    </div>
 </body>
 </html>

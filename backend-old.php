@@ -1,10 +1,10 @@
 <?php
-// backend.php - Système complet Google Docs + SignNow
+// backend.php - Système complet Google Docs + SignNow avec DomPDF
 require_once 'config.php';
+require_once 'vendor/autoload.php'; // Autoloader Composer
 
-// Configuration Google Docs
-define('GOOGLE_DOCS_ID', 'VOTRE_GOOGLE_DOCS_ID_ICI'); // À remplacer par votre ID Google Docs
-define('GOOGLE_SERVICE_ACCOUNT_FILE', 'service-account.json'); // Fichier de credentials Google
+use Dompdf\Dompdf;
+use Dompdf\Options;
 
 // Traitement du formulaire
 $message = '';
@@ -12,7 +12,7 @@ $error = '';
 
 if ($_POST && isset($_POST['action']) && $_POST['action'] === 'generate_contract') {
     try {
-        $result = generateContractFromGoogleDocs($_POST);
+        $result = generateContractFromTemplate($_POST);
         if ($result['success']) {
             $message = "✅ Contrat généré et envoyé avec succès à " . htmlspecialchars($_POST['email_acheteur']);
             logMessage("Contrat généré pour " . $_POST['prenom_acheteur'] . " " . $_POST['nom_acheteur'], 'SUCCESS');
@@ -27,7 +27,7 @@ if ($_POST && isset($_POST['action']) && $_POST['action'] === 'generate_contract
 }
 
 // Fonction principale pour générer le contrat
-function generateContractFromGoogleDocs($formData) {
+function generateContractFromTemplate($formData) {
     try {
         // 1. Validation des données
         $validation = validateContractData($formData);
@@ -35,14 +35,14 @@ function generateContractFromGoogleDocs($formData) {
             return ['success' => false, 'message' => $validation['message']];
         }
         
-        // 2. Créer une copie du Google Docs et remplacer les placeholders
-        $documentContent = fillGoogleDocsTemplate($formData);
-        if (!$documentContent) {
-            return ['success' => false, 'message' => 'Impossible de traiter le modèle Google Docs'];
+        // 2. Créer le contenu HTML avec les données du formulaire
+        $htmlContent = fillContractTemplate($formData);
+        if (!$htmlContent) {
+            return ['success' => false, 'message' => 'Impossible de traiter le modèle de contrat'];
         }
         
-        // 3. Convertir en PDF
-        $pdfPath = convertToPdf($documentContent, $formData);
+        // 3. Convertir en PDF avec DomPDF
+        $pdfPath = convertToPdfWithDomPDF($htmlContent, $formData);
         if (!$pdfPath) {
             return ['success' => false, 'message' => 'Impossible de générer le PDF'];
         }
@@ -64,7 +64,7 @@ function generateContractFromGoogleDocs($formData) {
         return $inviteResult;
         
     } catch (Exception $e) {
-        logMessage("Erreur generateContractFromGoogleDocs: " . $e->getMessage(), 'ERROR');
+        logMessage("Erreur generateContractFromTemplate: " . $e->getMessage(), 'ERROR');
         return ['success' => false, 'message' => 'Erreur lors de la génération: ' . $e->getMessage()];
     }
 }
@@ -110,26 +110,23 @@ function validateContractData($data) {
     return ['valid' => true];
 }
 
-// Fonction pour remplir le modèle Google Docs (Version simplifiée)
-function fillGoogleDocsTemplate($data) {
+// Fonction pour remplir le modèle de contrat
+function fillContractTemplate($data) {
     try {
-        // Version simplifiée : on va simuler le contenu du Google Docs
-        // En production, il faudrait utiliser l'API Google Docs
-        
         $template = getContractTemplate();
         
         // Remplacer tous les placeholders
         $replacements = [
-            '{{id_boutique}}' => $data['id_boutique'],
-            '{{nom_acheteur}}' => $data['nom_acheteur'],
-            '{{prenom_acheteur}}' => $data['prenom_acheteur'],
-            '{{adresse_acheteur}}' => $data['adresse_acheteur'],
-            '{{telephone_acheteur}}' => $data['telephone_acheteur'],
-            '{{email_acheteur}}' => $data['email_acheteur'],
-            '{{piece_identite}}' => $data['piece_identite'],
+            '{{id_boutique}}' => htmlspecialchars($data['id_boutique']),
+            '{{nom_acheteur}}' => htmlspecialchars($data['nom_acheteur']),
+            '{{prenom_acheteur}}' => htmlspecialchars($data['prenom_acheteur']),
+            '{{adresse_acheteur}}' => htmlspecialchars($data['adresse_acheteur']),
+            '{{telephone_acheteur}}' => htmlspecialchars($data['telephone_acheteur']),
+            '{{email_acheteur}}' => htmlspecialchars($data['email_acheteur']),
+            '{{piece_identite}}' => htmlspecialchars($data['piece_identite']),
             '{{date_naissance}}' => formatDate($data['date_naissance']),
-            '{{type_produits}}' => $data['type_produits'],
-            '{{secteur_activite}}' => $data['secteur_activite'],
+            '{{type_produits}}' => htmlspecialchars($data['type_produits']),
+            '{{secteur_activite}}' => htmlspecialchars($data['secteur_activite']),
             '{{date_lancement}}' => formatDate($data['date_lancement']),
             '{{ca_mensuel}}' => formatCurrency($data['ca_mensuel']),
             '{{prix_boutique}}' => formatCurrency($data['prix_boutique']),
@@ -141,25 +138,77 @@ function fillGoogleDocsTemplate($data) {
         return $filledContent;
         
     } catch (Exception $e) {
-        logMessage("Erreur fillGoogleDocsTemplate: " . $e->getMessage(), 'ERROR');
+        logMessage("Erreur fillContractTemplate: " . $e->getMessage(), 'ERROR');
         return false;
     }
 }
 
-// Template de contrat (à adapter selon votre Google Docs)
+// Template de contrat avec Text Tags SignNow
 function getContractTemplate() {
     return '
 <!DOCTYPE html>
-<html>
+<html lang="fr">
 <head>
     <meta charset="UTF-8">
-    <title>Contrat d\'Acquisition Boutique</title>
+    <title>Contrat d\'Acquisition Boutique E-Commerce</title>
     <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; margin: 40px; }
-        .header { text-align: center; margin-bottom: 30px; }
-        .section { margin: 20px 0; }
-        .signature-area { margin-top: 50px; }
-        .text-tag { color: #ccc; font-size: 10px; }
+        body { 
+            font-family: Arial, sans-serif; 
+            line-height: 1.6; 
+            margin: 40px;
+            color: #333;
+        }
+        .header { 
+            text-align: center; 
+            margin-bottom: 40px;
+            border-bottom: 2px solid #2E86AB;
+            padding-bottom: 20px;
+        }
+        .header h1 {
+            color: #2E86AB;
+            margin-bottom: 10px;
+        }
+        .section { 
+            margin: 30px 0; 
+            page-break-inside: avoid;
+        }
+        .section h2 {
+            color: #A23B72;
+            border-left: 4px solid #A23B72;
+            padding-left: 10px;
+        }
+        .info-box {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 15px 0;
+        }
+        .signature-area { 
+            margin-top: 50px;
+            border: 1px dashed #ccc;
+            padding: 20px;
+            background: #fafafa;
+        }
+        .text-tag { 
+            color: #007bff; 
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .paraphe-zone {
+            margin: 30px 0;
+            text-align: right;
+            border-top: 1px solid #eee;
+            padding-top: 10px;
+        }
+        .financial-highlight {
+            background: #e8f5e8;
+            border: 2px solid #28a745;
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 1.2em;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
@@ -170,96 +219,129 @@ function getContractTemplate() {
     </div>
 
     <div class="section">
-        <h2>PARTIES AU CONTRAT</h2>
+        <h2>ARTICLE 1 - PARTIES AU CONTRAT</h2>
         
-        <p><strong>VENDEUR :</strong><br>
-        MPI MANAGE LTD<br>
-        Société de droit anglais<br>
-        Email: support@shopbuyhere.co</p>
+        <div class="info-box">
+            <p><strong>VENDEUR :</strong><br>
+            MPI MANAGE LTD<br>
+            Société de droit anglais<br>
+            Email: support@shopbuyhere.co</p>
+        </div>
         
-        <p><strong>ACHETEUR :</strong><br>
-        <strong>{{prenom_acheteur}} {{nom_acheteur}}</strong><br>
-        Né(e) le : {{date_naissance}}<br>
-        Adresse : {{adresse_acheteur}}<br>
-        Téléphone : {{telephone_acheteur}}<br>
-        Email : {{email_acheteur}}<br>
-        Pièce d\'identité : {{piece_identite}}</p>
+        <div class="info-box">
+            <p><strong>ACHETEUR :</strong><br>
+            <strong>{{prenom_acheteur}} {{nom_acheteur}}</strong><br>
+            Né(e) le : {{date_naissance}}<br>
+            Adresse : {{adresse_acheteur}}<br>
+            Téléphone : {{telephone_acheteur}}<br>
+            Email : {{email_acheteur}}<br>
+            Pièce d\'identité : {{piece_identite}}</p>
+        </div>
     </div>
 
-    <div class="section">
-        <h2>OBJET DU CONTRAT</h2>
-        <p>Le présent contrat a pour objet l\'acquisition de la boutique e-commerce identifiée par l\'ID <strong>{{id_boutique}}</strong>, spécialisée dans la vente de {{type_produits}} dans le secteur {{secteur_activite}}.</p>
-        
-        <p><strong>Informations de la boutique :</strong></p>
-        <ul>
-            <li>Date de lancement : {{date_lancement}}</li>
-            <li>Secteur d\'activité : {{secteur_activite}}</li>
-            <li>Type de produits : {{type_produits}}</li>
-            <li>Chiffre d\'affaires mensuel moyen : {{ca_mensuel}}</li>
-        </ul>
-    </div>
-
-    <div class="section">
-        <h2>CONDITIONS FINANCIÈRES</h2>
-        <p><strong>Prix d\'acquisition total : {{prix_boutique}}</strong></p>
-        <p>Le paiement sera effectué selon les modalités convenues entre les parties.</p>
-    </div>
-
-    <div class="section">
-        <h2>OBLIGATIONS DES PARTIES</h2>
-        <p>Le vendeur s\'engage à transférer la propriété complète de la boutique e-commerce à l\'acheteur.</p>
-        <p>L\'acheteur s\'engage à respecter les conditions de paiement et à maintenir l\'activité commerciale.</p>
-    </div>
-
-    <div class="signature-area">
-        <p>Paraphe de l\'acheteur (à apposer en bas de chaque page) :</p>
-        <p class="text-tag">[[i|initial|req|signer1]]</p>
+    <div class="paraphe-zone">
+        <p><strong>Paraphe de l\'acheteur :</strong> <span class="text-tag">[[i|initial|req|signer1]]</span></p>
     </div>
 
     <div style="page-break-before: always;">
-        <h2>CONDITIONS GÉNÉRALES</h2>
-        <p>Ce contrat est régi par le droit anglais. Toute modification doit faire l\'objet d\'un avenant écrit.</p>
-        
-        <div class="signature-area">
-            <p>Paraphe de l\'acheteur :</p>
-            <p class="text-tag">[[i|initial|req|signer1]]</p>
+        <div class="section">
+            <h2>ARTICLE 2 - OBJET DU CONTRAT</h2>
+            <p>Le présent contrat a pour objet l\'acquisition de la boutique e-commerce identifiée par l\'ID <strong>{{id_boutique}}</strong>, spécialisée dans la vente de {{type_produits}} dans le secteur {{secteur_activite}}.</p>
+            
+            <div class="info-box">
+                <p><strong>Informations de la boutique :</strong></p>
+                <ul>
+                    <li>Date de lancement : {{date_lancement}}</li>
+                    <li>Secteur d\'activité : {{secteur_activite}}</li>
+                    <li>Type de produits : {{type_produits}}</li>
+                    <li>Chiffre d\'affaires mensuel moyen : {{ca_mensuel}}</li>
+                </ul>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>ARTICLE 3 - CONDITIONS FINANCIÈRES</h2>
+            <div class="financial-highlight">
+                Prix d\'acquisition total : {{prix_boutique}}
+            </div>
+            <p>Le paiement sera effectué selon les modalités convenues entre les parties. Ce prix comprend l\'ensemble des éléments constitutifs de la boutique e-commerce.</p>
+        </div>
+
+        <div class="paraphe-zone">
+            <p><strong>Paraphe de l\'acheteur :</strong> <span class="text-tag">[[i|initial|req|signer1]]</span></p>
         </div>
     </div>
 
     <div style="page-break-before: always;">
-        <h2>SIGNATURES</h2>
-        <p>Les parties reconnaissent avoir lu et accepté toutes les clauses du présent contrat.</p>
-        
-        <div style="margin-top: 100px;">
-            <p><strong>Signature de l\'acheteur :</strong></p>
-            <p class="text-tag">[[s|signature|req|signer1]]</p>
-            <p>{{prenom_acheteur}} {{nom_acheteur}}</p>
-            <p>Date : {{date_contrat}}</p>
+        <div class="section">
+            <h2>ARTICLE 4 - OBLIGATIONS DES PARTIES</h2>
+            
+            <h3>4.1 Obligations du vendeur</h3>
+            <p>Le vendeur s\'engage à :</p>
+            <ul>
+                <li>Transférer la propriété complète de la boutique e-commerce à l\'acheteur</li>
+                <li>Fournir tous les accès et documentations nécessaires</li>
+                <li>Assurer une transition efficace</li>
+            </ul>
+
+            <h3>4.2 Obligations de l\'acheteur</h3>
+            <p>L\'acheteur s\'engage à :</p>
+            <ul>
+                <li>Respecter les conditions de paiement</li>
+                <li>Maintenir l\'activité commerciale dans le respect des bonnes pratiques</li>
+                <li>Respecter les engagements contractuels</li>
+            </ul>
         </div>
-        
-        <div style="margin-top: 50px;">
-            <p><strong>Signature du vendeur :</strong></p>
-            <p>MPI MANAGE LTD</p>
-            <p>Date : {{date_contrat}}</p>
+
+        <div class="section">
+            <h2>ARTICLE 5 - DISPOSITIONS GÉNÉRALES</h2>
+            <p>Ce contrat est régi par le droit anglais. Toute modification doit faire l\'objet d\'un avenant écrit signé par les deux parties.</p>
+            <p>En cas de litige, les parties s\'engagent à rechercher une solution amiable avant tout recours judiciaire.</p>
+        </div>
+
+        <div class="paraphe-zone">
+            <p><strong>Paraphe de l\'acheteur :</strong> <span class="text-tag">[[i|initial|req|signer1]]</span></p>
+        </div>
+    </div>
+
+    <div style="page-break-before: always;">
+        <div class="section">
+            <h2>ARTICLE 6 - SIGNATURES</h2>
+            <p>Les parties reconnaissent avoir lu et accepté toutes les clauses du présent contrat.</p>
+            
+            <div style="margin-top: 60px; display: flex; justify-content: space-between;">
+                <div style="width: 45%;">
+                    <p><strong>Signature de l\'acheteur :</strong></p>
+                    <div class="signature-area">
+                        <p class="text-tag">[[s|signature|req|signer1]]</p>
+                        <p>{{prenom_acheteur}} {{nom_acheteur}}</p>
+                        <p>Date : {{date_contrat}}</p>
+                    </div>
+                </div>
+                
+                <div style="width: 45%;">
+                    <p><strong>Signature du vendeur :</strong></p>
+                    <div class="signature-area">
+                        <p>MPI MANAGE LTD</p>
+                        <p>Date : {{date_contrat}}</p>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 </body>
 </html>';
 }
 
-// Fonction pour convertir en PDF
-function convertToPdf($htmlContent, $data) {
+// Fonction pour convertir en PDF avec DomPDF
+function convertToPdfWithDomPDF($htmlContent, $data) {
     try {
-        // Utilisation de DomPDF (il faut l'installer via Composer)
-        // composer require dompdf/dompdf
-        
-        require_once 'vendor/autoload.php';
-        use Dompdf\Dompdf;
-        use Dompdf\Options;
-        
+        // Configuration DomPDF
         $options = new Options();
         $options->set('defaultFont', 'Arial');
         $options->set('isRemoteEnabled', true);
+        $options->set('isHtml5ParserEnabled', true);
+        $options->set('chroot', realpath(''));
         
         $dompdf = new Dompdf($options);
         $dompdf->loadHtml($htmlContent);
@@ -272,10 +354,11 @@ function convertToPdf($htmlContent, $data) {
         
         file_put_contents($filepath, $dompdf->output());
         
+        logMessage("PDF généré avec succès: $filename", 'SUCCESS');
         return $filepath;
         
     } catch (Exception $e) {
-        logMessage("Erreur convertToPdf: " . $e->getMessage(), 'ERROR');
+        logMessage("Erreur convertToPdfWithDomPDF: " . $e->getMessage(), 'ERROR');
         return false;
     }
 }
@@ -394,7 +477,6 @@ function formatCurrency($amount) {
 
 // Interface HTML si pas de POST
 if (!$_POST) {
-    // Rediriger vers l'interface ou inclure le formulaire
     header('Location: index.php');
     exit;
 }
@@ -406,24 +488,79 @@ if (!$_POST) {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Résultat Génération Contrat</title>
     <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .success { background: #d4edda; color: #155724; padding: 20px; border-radius: 8px; margin: 20px 0; }
-        .error { background: #f8d7da; color: #721c24; padding: 20px; border-radius: 8px; margin: 20px 0; }
-        .btn { background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; display: inline-block; margin: 10px 0; }
+        body { 
+            font-family: Arial, sans-serif; 
+            max-width: 800px; 
+            margin: 0 auto; 
+            padding: 20px;
+            background: #f8f9fa;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        .success { 
+            background: #d4edda; 
+            color: #155724; 
+            padding: 20px; 
+            border-radius: 8px; 
+            margin: 20px 0;
+            border-left: 4px solid #28a745;
+        }
+        .error { 
+            background: #f8d7da; 
+            color: #721c24; 
+            padding: 20px; 
+            border-radius: 8px; 
+            margin: 20px 0;
+            border-left: 4px solid #dc3545;
+        }
+        .btn { 
+            background: #007bff; 
+            color: white; 
+            padding: 12px 24px; 
+            text-decoration: none; 
+            border-radius: 5px; 
+            display: inline-block; 
+            margin: 10px 5px;
+            transition: background 0.3s;
+        }
+        .btn:hover {
+            background: #0056b3;
+        }
+        .btn.success {
+            background: #28a745;
+        }
+        .btn.success:hover {
+            background: #1e7e34;
+        }
     </style>
 </head>
 <body>
-    <h1>🏪 Résultat Génération Contrat</h1>
-    
-    <?php if ($message): ?>
-        <div class="success"><?= $message ?></div>
-    <?php endif; ?>
-    
-    <?php if ($error): ?>
-        <div class="error"><?= $error ?></div>
-    <?php endif; ?>
-    
-    <a href="index.php" class="btn">← Retour au formulaire</a>
-    <a href="logs.php" class="btn">📋 Voir les logs</a>
+    <div class="container">
+        <h1>🏪 Résultat Génération Contrat</h1>
+        
+        <?php if ($message): ?>
+            <div class="success">
+                <h3>✅ Succès !</h3>
+                <p><?= $message ?></p>
+            </div>
+        <?php endif; ?>
+        
+        <?php if ($error): ?>
+            <div class="error">
+                <h3>❌ Erreur</h3>
+                <p><?= $error ?></p>
+            </div>
+        <?php endif; ?>
+        
+        <div style="text-align: center; margin-top: 30px;">
+            <a href="index.php" class="btn success">← Retour au formulaire</a>
+            <a href="logs.php" class="btn">📋 Voir les logs</a>
+            <a href="test-final.php" class="btn">🔍 Diagnostic système</a>
+        </div>
+    </div>
 </body>
 </html>
